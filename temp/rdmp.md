@@ -231,4 +231,176 @@ Build the full pipeline on your laptop processing recorded video from your phone
 **Tips:**
 - FCOS3D's key insight is predicting a 3D offset from the 2D center — it converts 2D detection into 3D by learning to regress depth, 3D dimensions, and orientation per object. Understand this mechanism, it comes up in interviews
 - The nuScenes mini split is small enough that your model will overfit. That's expected. You're learning the training pipeline, not producing a production model
-- mmdet3d's config in
+- mmdet3d's config inheritance is confusing at first. Trace through the config chain once manually — base config → model config → dataset config → schedule. Understanding this system transfers to any OpenMMLab project
+
+**Deliverable:** Same as PointPillars — configs, results table, ablation analysis, clean README.
+
+### 2.4 Systems Thinking
+
+**What to study:**
+- Pipeline latency breakdown: how to profile where time is spent (model inference vs preprocessing vs postprocessing vs tracking vs rendering)
+- Parallel execution: can detection and depth run concurrently? What's the bottleneck — GPU compute or memory bandwidth?
+- Memory budgeting: how much VRAM/RAM do N models consume simultaneously?
+- Thermal throttling: why your phone slows down after 2 minutes of sustained inference. How to design for thermal limits (adaptive frame rate, model switching)
+- Frame dropping: process every frame vs skip frames vs adaptive rate based on scene complexity
+
+**Tips:**
+- Build a simple profiling wrapper around your Python pipeline early. Even just `time.time()` around each stage. You need to know where the time goes before you can optimize
+- The most common mistake: optimizing the model when the bottleneck is actually preprocessing or data copying. Profile first, optimize second. Always
+
+---
+
+### Phase 2 Completion Checkpoint
+
+- [ ] Your Python pipeline processes a recorded video end-to-end and produces a BEV animation with tracked objects, distances, and velocities
+- [ ] TTC computation works: approaching objects show decreasing TTC
+- [ ] PointPillars trained on KITTI with baseline mAP reported and 3 ablations documented
+- [ ] FCOS3D trained on nuScenes mini with NDS/mAP reported and 2 ablations documented
+- [ ] Both training repos have clean READMEs with reproduction instructions
+- [ ] You can explain the PointPillars pillar encoding AND the FCOS3D 3D regression head from memory
+- [ ] You have a latency breakdown of your Python pipeline and know which stage is slowest
+
+---
+
+## Phase 3: Mobile Deployment & Optimization (Month 5–6)
+
+Port the Python pipeline to Android. Your RTST experience is directly relevant here — CameraX, ExecuTorch/LiteRT, buffer management, you've done this before. The new challenge is multi-model orchestration and real-time geometric computation.
+
+### 3.1 Model Export
+
+- Export detection model (YOLOv8 or RT-DETR) to TFLite or compile via Qualcomm AI Hub
+- Export depth model (Depth Anything V2) — check operator coverage. Depth models with ViT backbones can have unsupported ops. Have a fallback plan (smaller variant, MiDaS)
+- Test both models on-device individually before integrating. Measure latency and memory per model in isolation
+
+**Tips:**
+- Check Qualcomm AI Hub first. If pre-compiled, quantized versions of your models exist, use them. Don't export from scratch unless you have to — you already proved you can do that with RTST
+- If depth model export fails due to unsupported ops, try the small variant of Depth Anything V2 first, then MiDaS as a fallback. Don't spend weeks fighting export issues
+- Measure thermal behavior: run each model in a loop for 5 minutes. Plot inference time over time. The curve will show when thermal throttling kicks in. Design your frame rate targets around the throttled speed, not the peak speed
+
+### 3.2 Android Pipeline
+
+- CameraX frame capture → preprocess → detection inference → depth inference → parse outputs
+- Implement ByteTrack in C++ (preferred for interview signal and performance) or Kotlin (faster to iterate)
+- Wire tracking: detections per frame → Kalman predict → Hungarian match → update → track IDs with velocity
+- Distance estimation: median depth within bounding box, back-project using camera intrinsics from CameraCharacteristics API
+- TTC computation: `TTC = distance / closing_velocity` per tracked object
+- IMU integration: read TYPE_ROTATION_VECTOR from SensorManager, apply rotation to 3D coordinates
+- BEV rendering: Canvas or OpenGL overlay showing top-down view. Pure geometry — no model
+
+**Tips:**
+- Build incrementally. Week 1: detection only running on device with bounding box overlay. Week 2: add depth and distance labels. Week 3: add tracking with IDs. Week 4: add IMU + BEV + TTC. Don't try to wire everything at once
+- The multi-model scheduling problem is real. Two options: run sequentially (simpler, ~2× latency) or run in parallel on different hardware units (detection on NPU, depth on GPU). Start sequential, optimize later
+- Pre-allocate all buffers. You know the input/output shapes. No dynamic allocation in the inference loop. You learned this from RTST — apply it
+- Your RTST CameraX scaffold with STRATEGY_KEEP_ONLY_LATEST is directly reusable here
+
+### 3.3 Optimization
+
+- Profile the full pipeline on-device. Where is time spent?
+- C++ critical path: if Kalman filter + Hungarian matching + back-projection + BEV math is in Kotlin, consider porting to C++ via JNI. These are pure math operations that benefit from native execution
+- Threading: camera frame producer → inference consumer → tracking/rendering consumer. Don't do everything on the main thread
+- Adaptive frame rate: if thermal throttling drops inference below your target, reduce frame rate gracefully rather than dropping frames randomly
+- Battery profiling: how long can the app run continuously? This matters for a real-world demo
+
+**Tips:**
+- Don't optimize prematurely. Get it working end-to-end first, even if it's slow. Then profile. Then optimize the actual bottleneck, not what you assume is slow
+- The C++ port of tracking is a strong interview talking point, but only if you can explain WHY C++ was necessary (measured latency improvement). "I used C++ because it's faster" is weak. "Kotlin tracking took 12ms per frame, C++ brought it to 3ms, which gave me enough headroom to run depth at full resolution" is strong
+
+### 3.4 Stretch Features (if time permits)
+
+- Tap-to-segment: SAM2 or EfficientSAM on device — this is genuinely hard and would be impressive
+- Trajectory prediction: linear extrapolation of tracked velocity vectors, visualized as future position dots
+- Style transfer on selected objects: you literally already have the model from RTST
+
+**Tips:**
+- Trajectory prediction via linear extrapolation is trivial to implement (30 minutes of code) and looks impressive in demos. Do this even if you skip the other stretch features
+- SAM2 on-device is a real engineering challenge. Only attempt if the core pipeline is solid and you have 2+ weeks left. Don't let a stretch goal compromise your main deliverable
+
+---
+
+### Phase 3 Completion Checkpoint
+
+- [ ] App runs on your OnePlus with real-time detection + depth + tracking + BEV overlay
+- [ ] Demo video: 60-90 seconds of you walking down a Tokyo street with the full pipeline running. Real conditions — daylight, some pedestrians, some vehicles
+- [ ] Latency breakdown documented: per-model inference time, tracking time, total frame time, sustained FPS after thermal throttling
+- [ ] At least one optimization documented with before/after measurements
+- [ ] README includes architecture diagram, component descriptions, performance table, known limitations
+- [ ] Bonus: a second demo video in a different condition (evening, rain, crowded intersection) showing where the pipeline degrades and why
+
+---
+
+## Final Deliverable Checklist
+
+### GitHub Repo Structure (suggested)
+```
+perception-pipeline/
+├── training/
+│   ├── pointpillars-kitti/
+│   │   ├── configs/
+│   │   ├── results/
+│   │   └── README.md          ← baseline + ablation table + analysis
+│   └── fcos3d-nuscenes/
+│       ├── configs/
+│       ├── results/
+│       └── README.md          ← baseline + ablation table + analysis
+├── pipeline/
+│   ├── python/                ← offline Python pipeline (Phase 2)
+│   └── android/               ← the app (Phase 3)
+├── docs/
+│   ├── architecture.png       ← system diagram
+│   ├── performance.md         ← latency breakdown, FPS, thermal behavior
+│   └── limitations.md         ← honest failure mode documentation
+├── demos/
+│   ├── bev-animation.mp4      ← Python pipeline output
+│   ├── app-demo-daylight.mp4  ← Android app, good conditions
+│   └── app-demo-evening.mp4   ← Android app, challenging conditions (stretch)
+└── README.md                  ← project overview, motivation, results summary
+```
+
+### What Hiring Managers Will Actually Look At
+1. The README — 90% of people stop here. Make it count. Architecture diagram, one-paragraph motivation, key results, demo video embedded
+2. The demo video — they'll watch 30 seconds. Make the first 10 seconds show the BEV overlay working. That's the hook
+3. The training results table — if they're technical, they'll check whether your numbers make sense and whether your ablations show you understand what you're doing
+4. The limitations doc — this is where senior engineers separate "knows what they built" from "followed a tutorial." Honest documentation of failure modes is more impressive than polished demos
+
+### What You Should Be Able To Do Without AI
+
+- Camera geometry: projection, back-projection, calibration, coordinate transforms
+- Kalman filter: implement from scratch, tune process/measurement noise
+- Hungarian matching: set up the cost matrix, interpret the assignment
+- BEV construction from monocular depth using pure geometry
+- IMU data interpretation, rotation application, ego-motion compensation
+- Latency profiling and identifying bottlenecks
+- Explaining PointPillars architecture, FCOS3D regression heads, ByteTrack association logic
+- Reasoning about training results — why an ablation moved numbers in a particular direction
+
+### What AI Assistance Is Acceptable For
+- Android boilerplate, UI layouts, XML configs
+- Model export debugging (TFLite/ExecuTorch operator coverage issues)
+- OpenPCDet/mmdet3d config syntax and data preparation scripts
+- C++ JNI bridge boilerplate
+- Visualization code (matplotlib animations, OpenGL overlays)
+
+---
+
+## Interview Talking Points This Roadmap Prepares You For
+
+**"Walk me through your perception pipeline."**
+→ Detection → depth → back-projection → tracking → IMU fusion → BEV. You built every component.
+
+**"How did you handle the scale ambiguity in monocular depth?"**
+→ Calibration with known distances, median depth sampling within bounding boxes, and you know the fundamental limitation.
+
+**"Have you trained any 3D detection models?"**
+→ PointPillars on KITTI, FCOS3D on nuScenes. Here are my numbers, here's what I learned from ablations.
+
+**"What's the hardest engineering problem you solved?"**
+→ Multi-model orchestration on a phone under thermal constraints, or tracking through occlusion, or IMU-camera synchronization. Pick whichever was actually hardest for you.
+
+**"What would you do differently?"**
+→ Your limitations doc. Companies that do perception at scale care deeply about whether you can identify your own system's weaknesses.
+
+**Concepts you should know but won't implement (for interview discussion):**
+- BEVFormer, PETR, StreamPETR — transformer-based multi-camera 3D detection. Know the idea (project image features into BEV space using attention), know why they need multi-GPU, know they're the current frontier
+- LiDAR-camera fusion (BEVFusion) — know the concept of projecting both modalities into a shared BEV space
+- Occupancy networks — know this is the latest trend beyond bounding boxes (predicting which 3D voxels are occupied)
+- HD maps and map-conditioned planning — know that perception feeds into downstream planning modules
